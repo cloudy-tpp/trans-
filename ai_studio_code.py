@@ -3,21 +3,28 @@ import google.generativeai as genai
 from docx import Document
 import io
 import time
+import os
 
-# --- CẤU HÌNH GIAO DIỆN ---
-st.set_page_config(page_title="AI Translator Pro", layout="wide")
-st.title("🌐 AI Translator (Hỗ trợ PDF lớn & Word)")
+# --- CẤU HÌNH TRANG ---
+st.set_page_config(page_title="AI Translator Ultimate", layout="wide")
+st.title("🌐 AI Translator (Gemini 1.5 Flash/Pro)")
 
-# Sidebar cấu hình
+# Sidebar
 with st.sidebar:
-    st.header("Cấu hình")
-    user_api_key = st.text_input("Dán Gemini API Key vào đây:", type="password")
-    # Cập nhật lại tên model chuẩn xác nhất
-    model_choice = st.selectbox("Chọn Model", ["gemini-1.5-flash", "gemini-1.5-pro"])
+    st.header("Cài đặt API")
+    user_api_key = st.text_input("Dán Gemini API Key:", type="password")
+    
+    # Sử dụng các ID model chuẩn xác nhất để tránh lỗi 404
+    model_choice = st.selectbox("Chọn Model", [
+        "gemini-1.5-flash-latest", 
+        "gemini-1.5-pro-latest",
+        "gemini-2.0-flash-exp"
+    ])
+    
     target_lang = st.selectbox("Ngôn ngữ đích", ["Tiếng Việt", "English", "French", "Japanese", "Korean", "Chinese"])
-    st.info("Lấy Key tại: https://aistudio.google.com/app/apikey")
+    st.markdown("---")
+    st.info("Lưu ý: Với file 160MB, AI cần thời gian để tải lên và phân tích. Vui lòng kiên nhẫn.")
 
-# Hàm xuất file Word
 def export_docx(text):
     doc = Document()
     doc.add_paragraph(text)
@@ -25,68 +32,85 @@ def export_docx(text):
     doc.save(bio)
     return bio.getvalue()
 
-# GIAO DIỆN CHÍNH
+# Kiểm tra API Key
 if user_api_key:
     genai.configure(api_key=user_api_key)
     
     col1, col2 = st.columns(2)
     
+    input_data = None
     with col1:
         st.subheader("Đầu vào")
-        input_type = st.radio("Chọn hình thức:", ["Nhập văn bản", "Tải file PDF"])
+        input_type = st.radio("Phương thức:", ["Nhập văn bản", "Tải file PDF lớn"])
         
-        input_data = None
         if input_type == "Nhập văn bản":
-            input_data = st.text_area("Dán văn bản cần dịch:", height=300)
+            input_data = st.text_area("Dán nội dung:", height=300)
         else:
-            input_data = st.file_uploader("Chọn file PDF (Hỗ trợ file lớn)", type=["pdf"])
+            input_data = st.file_uploader("Chọn file PDF (Tối đa 200MB)", type=["pdf"])
             if input_data:
-                st.success(f"Đã nhận file: {input_data.name} ({input_data.size/1024/1024:.2f} MB)")
+                st.success(f"✅ Đã nhận: {input_data.name}")
 
     with col2:
         st.subheader("Kết quả dịch")
-        if st.button("Dịch ngay 🚀"):
+        if st.button("Bắt đầu dịch ngay 🚀"):
             if not input_data:
-                st.warning("Vui lòng nhập nội dung hoặc tải file!")
+                st.error("Vui lòng cung cấp nội dung!")
             else:
-                with st.spinner("Đang xử lý (File lớn có thể mất 1-2 phút)..."):
+                with st.spinner("Đang xử lý dữ liệu... (File lớn có thể mất hơn 1 phút)"):
                     try:
+                        # 1. Khởi tạo Model
                         model = genai.GenerativeModel(model_name=model_choice)
                         
                         if input_type == "Nhập văn bản":
-                            prompt = f"Dịch văn bản sau đây sang {target_lang}. Chỉ trả về nội dung đã dịch:\n\n{input_data}"
-                            response = model.generate_content(prompt)
+                            response = model.generate_content(f"Dịch đoạn văn sau sang {target_lang}: {input_data}")
+                            result_text = response.text
                         else:
-                            # Tải file lên Google File API để xử lý file lớn/nặng
-                            # Lưu file tạm để upload
+                            # 2. Xử lý File PDF lớn qua File API
+                            # Lưu file tạm
                             with open("temp_file.pdf", "wb") as f:
                                 f.write(input_data.getbuffer())
                             
+                            # Upload lên server Google
+                            st.write(" đang tải file lên server AI...")
                             uploaded_file = genai.upload_file(path="temp_file.pdf", mime_type="application/pdf")
                             
-                            # Đợi file được xử lý trên server Google
+                            # Đợi file xử lý xong
                             while uploaded_file.state.name == "PROCESSING":
-                                time.sleep(2)
+                                time.sleep(5)
                                 uploaded_file = genai.get_file(uploaded_file.name)
                             
-                            prompt = f"Hãy dịch toàn bộ nội dung trong file PDF này sang {target_lang}. Chỉ trả về văn bản đã dịch, giữ nguyên cấu trúc nếu có thể."
+                            if uploaded_file.state.name == "FAILED":
+                                raise Exception("AI không thể xử lý file này.")
+
+                            # 3. Gửi yêu cầu dịch
+                            prompt = f"Hãy dịch toàn bộ nội dung trong file PDF này sang {target_lang}. Chỉ trả về văn bản đã dịch."
                             response = model.generate_content([prompt, uploaded_file])
-                        
-                        st.session_state.translated_result = response.text
-                        st.text_area("Bản dịch:", st.session_state.translated_result, height=400)
+                            result_text = response.text
+                            
+                            # Xóa file sau khi dịch xong để bảo mật
+                            genai.delete_file(uploaded_file.name)
+
+                        st.session_state.translated_result = result_text
+                        st.text_area("Bản dịch:", result_text, height=400)
                         
                     except Exception as e:
-                        st.error(f"Lỗi chi tiết: {str(e)}")
+                        error_msg = str(e)
+                        if "404" in error_msg:
+                            st.error("Lỗi 404: Tên model không hợp lệ hoặc API Key của bạn chưa hỗ trợ model này. Hãy thử chọn 'gemini-1.5-flash-latest'.")
+                        elif "429" in error_msg:
+                            st.error("Lỗi 429: Bạn đã hết hạn mức sử dụng miễn phí (Rate limit).")
+                        else:
+                            st.error(f"Lỗi: {error_msg}")
 
         # Nút tải file Word
         if 'translated_result' in st.session_state:
             st.markdown("---")
             docx_data = export_docx(st.session_state.translated_result)
             st.download_button(
-                label="📥 Tải về file Word (.docx)",
+                label="📥 Tải bản dịch (.docx)",
                 data=docx_data,
-                file_name=f"ban_dich_{target_lang}.docx",
+                file_name=f"dich_{target_lang}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
 else:
-    st.warning("Vui lòng nhập API Key ở cột bên trái để bắt đầu!")
+    st.info("Vui lòng nhập API Key để tiếp tục.")
