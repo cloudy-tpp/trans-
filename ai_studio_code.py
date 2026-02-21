@@ -1,101 +1,129 @@
 import streamlit as st
 import google.generativeai as genai
+from pypdf import PdfReader
 from docx import Document
 import io
 import time
 
-# --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="AI Translator Ultimate", layout="wide")
-st.title("🌐 AI Translator (Phiên bản Tự động Sửa lỗi 404)")
+# --- CẤU HÌNH ---
+st.set_page_config(page_title="AI Translator Pro Max", layout="wide")
 
-# Sidebar
+# Khởi tạo bộ nhớ lưu trữ lịch sử dịch trong phiên làm việc
+if 'trans_history' not in st.session_state:
+    st.session_state.trans_history = []
+
+st.title("🌐 AI Translator (Lưu trữ & Dịch nối tiếp)")
+
+# --- THANH BÊN (SIDEBAR) ---
 with st.sidebar:
-    st.header("Cấu hình API")
+    st.header("🔑 Cấu hình & Lịch sử")
     user_api_key = st.text_input("Dán Gemini API Key:", type="password")
     
-    available_models = []
+    # Quét model
+    model_choice = "gemini-1.5-flash"
     if user_api_key:
         try:
             genai.configure(api_key=user_api_key)
-            # Tự động quét các model mà API Key này có quyền truy cập
-            models = genai.list_models()
-            available_models = [m.name.replace('models/', '') for m in models if 'generateContent' in m.supported_generation_methods]
-            st.success("Đã kết nối API thành công!")
-        except Exception as e:
-            st.error(f"Lỗi kết nối API: {e}")
+            model_choice = st.selectbox("Chọn Model:", ["gemini-1.5-flash", "gemini-1.5-pro"])
+        except:
+            pass
+            
+    target_lang = st.selectbox("Ngôn ngữ đích:", ["Tiếng Việt", "English", "Chinese", "French"])
 
-    # Cho người dùng chọn từ danh sách thực tế của Google
-    if available_models:
-        model_choice = st.selectbox("Chọn Model (Hệ thống tự quét):", available_models)
+    st.markdown("---")
+    st.subheader("📚 Lịch sử dịch (Session)")
+    if not st.session_state.trans_history:
+        st.write("Chưa có bản ghi nào.")
     else:
-        model_choice = st.selectbox("Chọn Model mặc định:", ["gemini-1.5-flash", "gemini-1.5-pro"])
-        
-    target_lang = st.selectbox("Ngôn ngữ đích", ["Tiếng Việt", "English", "French", "Japanese", "Korean", "Chinese"])
-    st.info("Mẹo: Nếu lỗi 404, hãy thử chọn model có chữ 'flash' trong danh sách.")
+        for i, item in enumerate(st.session_state.trans_history):
+            with st.expander(f"Bản dịch {i+1}: {item['name']}"):
+                st.write(f"**Trang:** {item['pages']}")
+                st.write(item['content'][:200] + "...")
+                # Nút tải lại file word cho bản ghi cũ
+                doc_io = io.BytesIO()
+                d = Document()
+                d.add_paragraph(item['content'])
+                d.save(doc_io)
+                st.download_button(f"Tải lại .docx ({i+1})", data=doc_io.getvalue(), file_name=f"history_{i+1}.docx", key=f"dl_{i}")
 
-def export_docx(text):
-    doc = Document()
-    doc.add_paragraph(text)
-    bio = io.BytesIO()
-    doc.save(bio)
-    return bio.getvalue()
-
-# GIAO DIỆN CHÍNH
+# --- KHU VỰC CHÍNH ---
 if user_api_key:
-    col1, col2 = st.columns(2)
-    input_data = None
-    
-    with col1:
-        st.subheader("Đầu vào")
-        input_type = st.radio("Phương thức:", ["Nhập văn bản", "Tải file PDF"])
-        if input_type == "Nhập văn bản":
-            input_data = st.text_area("Dán nội dung:", height=300)
-        else:
-            input_data = st.file_uploader("Chọn file PDF", type=["pdf"])
-            if input_data:
-                st.success(f"Đã nhận file: {input_data.name}")
+    genai.configure(api_key=user_api_key)
+    col1, col2 = st.columns([1, 1])
 
-    with col2:
-        st.subheader("Kết quả dịch")
-        if st.button("Dịch ngay 🚀"):
-            if not input_data:
-                st.error("Chưa có nội dung để dịch!")
-            else:
-                with st.spinner("Đang xử lý (Vui lòng đợi)..."):
+    with col1:
+        st.subheader("📁 Tải tài liệu")
+        uploaded_file = st.file_uploader("Chọn file PDF (Hỗ trợ file cực lớn)", type=["pdf"])
+        
+        if uploaded_file:
+            # Đọc thông tin số trang
+            pdf_reader = PdfReader(uploaded_file)
+            total_pages = len(pdf_reader.pages)
+            st.success(f"Tài liệu có tổng cộng: **{total_pages} trang**")
+            
+            st.markdown("---")
+            st.subheader("✂️ Chọn đoạn cần dịch")
+            st.info("Vì file rất lớn, bạn nên dịch từng đoạn (ví dụ 10 trang một lần) để không bị lỗi hạn mức.")
+            
+            start_p = st.number_input("Từ trang:", min_value=1, max_value=total_pages, value=1)
+            end_p = st.number_input("Đến trang:", min_value=1, max_value=total_pages, value=min(10, total_pages))
+            
+            if st.button("Bắt đầu dịch đoạn này 🚀"):
+                with st.spinner(f"Đang dịch từ trang {start_p} đến {end_p}..."):
                     try:
-                        # Sử dụng chính xác ID model từ hệ thống
                         model = genai.GenerativeModel(model_name=model_choice)
                         
-                        if input_type == "Nhập văn bản":
-                            response = model.generate_content(f"Dịch sang {target_lang}: {input_data}")
-                            result_text = response.text
-                        else:
-                            # Lưu file tạm và upload
-                            with open("temp.pdf", "wb") as f:
-                                f.write(input_data.getbuffer())
-                            
-                            # Upload file (Cần dùng v1beta cho tính năng PDF)
-                            uploaded_file = genai.upload_file(path="temp.pdf", mime_type="application/pdf")
-                            
-                            while uploaded_file.state.name == "PROCESSING":
-                                time.sleep(3)
-                                uploaded_file = genai.get_file(uploaded_file.name)
-                            
-                            prompt = f"Hãy dịch toàn bộ nội dung trong file PDF này sang {target_lang}. Chỉ trả về nội dung đã dịch."
-                            response = model.generate_content([prompt, uploaded_file])
-                            result_text = response.text
-                            
-                            genai.delete_file(uploaded_file.name)
-
-                        st.session_state.translated_result = result_text
-                        st.text_area("Bản dịch:", result_text, height=400)
+                        # Upload file lên File API
+                        with open("temp_p.pdf", "wb") as f:
+                            f.write(uploaded_file.getbuffer())
+                        
+                        google_file = genai.upload_file(path="temp_p.pdf", mime_type="application/pdf")
+                        
+                        while google_file.state.name == "PROCESSING":
+                            time.sleep(3)
+                            google_file = genai.get_file(google_file.name)
+                        
+                        prompt = f"""
+                        Bạn là dịch giả chuyên nghiệp. 
+                        Hãy dịch nội dung từ trang {start_p} đến trang {end_p} của tài liệu này sang {target_lang}.
+                        Yêu cầu: Chỉ trả về nội dung đã dịch, không giải thích. 
+                        Giữ nguyên các tiêu đề và định dạng văn bản cơ bản.
+                        """
+                        
+                        response = model.generate_content([prompt, google_file])
+                        
+                        # Lưu vào lịch sử
+                        new_record = {
+                            "name": uploaded_file.name,
+                            "pages": f"{start_p} - {end_p}",
+                            "content": response.text
+                        }
+                        st.session_state.trans_history.append(new_record)
+                        st.session_state.last_result = response.text
+                        
+                        genai.delete_file(google_file.name)
+                        st.balloons()
                         
                     except Exception as e:
-                        st.error(f"Lỗi: {str(e)}")
-                        st.info("Hãy thử chọn một Model khác trong danh sách bên trái.")
+                        err = str(e)
+                        if "429" in err:
+                            st.error(f"Dừng tại trang {start_p}. Lỗi: Hết hạn mức (Quota). Hãy đổi API Key khác và dịch tiếp từ trang {start_p}!")
+                        else:
+                            st.error(f"Lỗi: {err}")
 
-        if 'translated_result' in st.session_state:
-            docx_data = export_docx(st.session_state.translated_result)
-            st.download_button("📥 Tải về file Word (.docx)", data=docx_data, file_name="ban_dich.docx")
+    with col2:
+        st.subheader("📝 Kết quả hiện tại")
+        if 'last_result' in st.session_state:
+            st.text_area("Bản dịch mới nhất:", st.session_state.last_result, height=500)
+            
+            # Xuất Word
+            doc = Document()
+            doc.add_paragraph(st.session_state.last_result)
+            bio = io.BytesIO()
+            doc.save(bio)
+            st.download_button("📥 Tải về bản dịch (.docx)", data=bio.getvalue(), file_name=f"dich_trang_{start_p}_{end_p}.docx")
+        else:
+            st.write("Chưa có kết quả dịch trong phiên này.")
+
 else:
-    st.warning("Vui lòng nhập API Key ở bên trái.")
+    st.warning("Vui lòng nhập API Key để bắt đầu.")
